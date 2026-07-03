@@ -1,46 +1,48 @@
-# XQuant — custom diffusion-model quantizer
+# XQuant — custom diffusion-model quantizer (zero third-party engine)
 
-Own quantization kernel that writes **byte-exact GGML** (our Q4_0 is byte-for-byte
-identical to the `gguf` reference) plus a custom sub-2-bit ternary format (−1/0/+1)
-with a ComfyUI loader node. Drag-and-drop a `.safetensors` model, get a compressed
-GGUF you can run in ComfyUI.
+Compress diffusion models (FLUX / SDXL / SD1.5 / SD3 / Qwen-Image / Wan …) to
+**2 / 3 / 4-bit GGUF** with a quantization engine written **entirely from scratch** —
+our own GGML-byte-exact kernel, our own GGUF writer, our own architecture detection.
+Drop a `bf16`/`fp16` model, get a compressed `.gguf` that runs in ComfyUI.
 
-## Features
-- **Own kernel** (`xquant.py`) — Q4_0 / Q3_K / Q2_K written from scratch (not a
-  library call), verified byte-identical / round-trip against the GGUF decoder.
-- **CLI tool** (`xquant_tool.py`) — auto-detects architecture (FLUX / Qwen / SDXL /
-  SD3 / Wan …) and compresses.
-- **Drag-and-drop** (`bats/`) — drop a model onto `Ужать_Q2_K.bat` / `Q3_K` / `Q4_0`.
-- **ComfyUI node** (`comfyui-node/ComfyUI-XQuant`) — loads the custom ternary format.
-- Critical layers (`final_layer`→VAE, `img_in`/`txt_in`, norms) are kept in bf16 so
-  the VAE connection is never broken.
+## Zero third-party engine
+The standalone engine depends on **numpy only** — no `llama.cpp`, no `gguf` library,
+no City96 `convert.py`, no torch:
+- **`xquant.py`** — quantization kernel from scratch. Our `Q4_0` output is
+  **byte-for-byte identical** to the GGUF reference; `Q3_K` / `Q2_K` verified via
+  round-trip through the ComfyUI-GGUF decoder.
+- **`xgguf.py`** — our own GGUF v3 writer (validated by an independent GGUF reader).
+- **`xquant_standalone.py`** — own safetensors reader (manual `bf16`/`fp16`/`fp8`
+  decode) + own architecture detection. **No external quantizer code.**
 
-## Bitrate switch (pick per your GPU)
-- **2 / 3 / 4-bit** → GGUF files, loaded by the standard `UnetLoaderGGUF` node
-  (file dropdown: `model-Q2_K / -Q3_K / -Q4_0.gguf`).
-- **1.6-bit ternary** → `.xqt`, loaded by our `XQuant Ternary Loader` node.
+## Universal critical-layer protection
+Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
+`proj_out`), and norms are kept in `bf16` for **every** architecture — so the VAE
+connection is never broken (the classic sub-4-bit "colour noise").
 
-## Results (FLUX.1-dev, tested by actual generation)
+## Results (FLUX.1-dev, tested by real generation)
 | bits | size | PSNR vs fp16 | verdict |
 |---|---|---|---|
 | fp16 | 23.8 GB | — | reference |
 | 4-bit Q4_0 | 6.4 GB | ~25 dB | perfect, indistinguishable |
 | 3-bit Q3_K | ~5 GB | ~18 dB | balanced |
-| 2-bit Q2_K | 3.9 GB | ~19 dB | size/quality sweet spot |
-| 1.6-bit ternary | — | ~8 dB | too lossy post-hoc; needs QAT/healing |
+| **2-bit Q2_K** | **4.0 GB** | ~19 dB | **size/quality sweet spot** |
 
-**Floor of post-hoc quantization ≈ 2 bit.** Below that, quality collapses without
-quantization-aware training (BitNet-style).
+**Post-hoc quantization floor ≈ 2-bit.** Below that (ternary 1.6-bit) quality
+collapses without quantization-aware training.
 
 ## Usage
+Drag a `.safetensors` model onto `compress_Q2_K.bat` (or `Q3_K` / `Q4_0`), or:
 ```
-python xquant_tool.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
+python xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 ```
-Output: `<model>-<qtype>.gguf` next to the input.
+Output: `<model>-<qtype>.gguf` next to the input. Load 2/3/4-bit GGUF with the
+`UnetLoaderGGUF` node in ComfyUI.
 
 ## License — AGPL-3.0
-This project is licensed under **GNU AGPL-3.0** (see `LICENSE`). Anyone who uses,
-modifies, or serves this code over a network **must release their full source under
-the same license.** Commercial closed-source use is not permitted.
+Licensed under **GNU AGPL-3.0**. Anyone who uses, modifies, or serves this code
+over a network **must release their full source under the same license.**
+Commercial closed-source use is not permitted.
 
-Uses City96's ComfyUI-GGUF `convert.py` (Apache-2.0) — see `NOTICE`.
+*(Optional `xquant_tool.py` variant reuses City96's ComfyUI-GGUF `convert.py`,
+Apache-2.0 — see `NOTICE`. The standalone engine above uses none of it.)*

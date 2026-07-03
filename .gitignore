@@ -4,3 +4,7 @@ __pycache__/
 *.safetensors
 *.xqt.safetensors
 work/
+build_venv/
+build_tmp/
+dist/
+*.spec
