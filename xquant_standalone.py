@@ -25,6 +25,42 @@ _BITS = [("8-бит (Q8_0) — почти без потерь","Q8_0"), ("6-би
          ("5-бит (Q5_0) — высокое","Q5_0"), ("4-бит (Q4_0) — идеал/баланс","Q4_0"),
          ("3-бит (Q3_K) — компактно","Q3_K"), ("2-бит (Q2_K) — минимум","Q2_K")]
 
+def find_model_dirs():
+    """Авто-детект папок моделей ComfyUI + LM Studio (существующие)."""
+    home = os.path.expanduser("~")
+    cands = []
+    for ev in ("XQUANT_MODELS_DIR", "COMFYUI_MODELS", "COMFYUI_MODELS_DIR"):
+        if os.environ.get(ev): cands.append(os.environ[ev])
+    cands += [
+        os.path.join(home, ".lmstudio", "models"),                 # LM Studio
+        os.path.join(home, ".cache", "lm-studio", "models"),
+        os.path.join(home, "ComfyUI", "models"),                   # ComfyUI
+        os.path.join(home, "Documents", "ComfyUI", "models"),
+        "D:/Comfy/models", "D:/ComfyUI/models", "C:/ComfyUI/models",
+        "D:/ComfyBot/comfyui_portable/ComfyUI_windows_portable/ComfyUI/models",
+    ]
+    seen = set(); out = []
+    for d in cands:
+        d = os.path.normpath(d)
+        if d not in seen and os.path.isdir(d): seen.add(d); out.append(d)
+    return out
+
+def scan_models(dirs, cap=400):
+    """Найти .safetensors/.gguf в папках (с ограничением глубины/кол-ва)."""
+    found = []
+    for base in dirs:
+        for root, dnames, files in os.walk(base):
+            if root[len(base):].count(os.sep) > 4: dnames[:] = []; continue
+            for f in files:
+                fl = f.lower()
+                if fl.endswith((".safetensors", ".gguf")) and "mmproj" not in fl:
+                    try: sz = os.path.getsize(os.path.join(root, f)) / 1e9
+                    except Exception: sz = 0
+                    if sz >= 0.05:                                  # мелочь пропускаем
+                        found.append((f"{f}  ({sz:.1f}ГБ)", os.path.join(root, f)))
+                    if len(found) >= cap: return found
+    return found
+
 def run_gui(prefill=""):
     """Полноценное окно: выбор файла + битность + прогресс. Сжатие в потоке."""
     import tkinter as tk
@@ -50,6 +86,31 @@ def run_gui(prefill=""):
         if p: path_var.set(p)
     tk.Button(frm, text="Обзор…", command=browse).grid(row=1, column=1, padx=(6,0))
     frm.columnconfigure(0, weight=1)
+
+    # авто-поиск моделей ComfyUI/LM Studio
+    mf = tk.Frame(root); mf.pack(fill="x", padx=18, pady=(2,0))
+    tk.Label(mf, text="Из ComfyUI/LM Studio:", font=("Segoe UI", 9), fg="#888").grid(row=0, column=0, sticky="w")
+    found_map = {}
+    fnd_var = tk.StringVar(value="")
+    fnd_cb = ttk.Combobox(mf, textvariable=fnd_var, values=[], state="readonly", width=44)
+    fnd_cb.grid(row=1, column=0, sticky="we", pady=2)
+    def on_pick(_=None):
+        p = found_map.get(fnd_var.get())
+        if p: path_var.set(p)
+    fnd_cb.bind("<<ComboboxSelected>>", on_pick)
+    def do_scan():
+        import threading
+        def w():
+            dirs = find_model_dirs()
+            items = scan_models(dirs)
+            found_map.clear()
+            for label, p in items: found_map[label] = p
+            fnd_cb["values"] = list(found_map.keys())
+            fnd_cb.set(f"найдено {len(items)} моделей — выбери" if items else "не нашёл (жми Обзор)")
+        threading.Thread(target=w, daemon=True).start()
+    tk.Button(mf, text="🔍 Найти", command=do_scan).grid(row=1, column=1, padx=(6,0))
+    mf.columnconfigure(0, weight=1)
+    do_scan()   # скан при открытии
 
     bf = tk.Frame(root); bf.pack(fill="x", padx=18, pady=6)
     tk.Label(bf, text="Битность:", font=("Segoe UI", 10)).pack(side="left")
