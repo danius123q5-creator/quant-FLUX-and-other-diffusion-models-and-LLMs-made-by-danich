@@ -67,7 +67,7 @@ def run_gui(prefill=""):
     from tkinter import ttk, filedialog
     import threading, queue
     root = tk.Tk(); root.title("XQuant — ужиматель моделей")
-    root.geometry("560x420"); root.minsize(520, 380)
+    root.geometry("565x625"); root.minsize(565, 625)   # всегда открывать в этом размере
     try: root.eval('tk::PlaceWindow . center')
     except Exception: pass
 
