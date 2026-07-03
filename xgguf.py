@@ -83,6 +83,39 @@ def _skip_kv_value(f, vt):
             else: f.read(_VT_FIXED.get(et,4))
     else: raise ValueError(f"unknown KV value_type {vt}")
 
+def _val_end(buf, pos, vt):
+    """Позиция сразу ПОСЛЕ значения KV в буфере (для in-place патча метадаты)."""
+    if vt in _VT_FIXED: return pos + _VT_FIXED[vt]
+    if vt == _STR:
+        n = struct.unpack_from("<Q", buf, pos)[0]; return pos + 8 + n
+    if vt == 9:
+        et = struct.unpack_from("<I", buf, pos)[0]; cnt = struct.unpack_from("<Q", buf, pos+4)[0]
+        p = pos + 12
+        for _ in range(cnt):
+            if et == _STR: n = struct.unpack_from("<Q", buf, p)[0]; p += 8 + n
+            elif et == 9: p = _val_end(buf, p, 9)
+            else: p += _VT_FIXED.get(et, 4)
+        return p
+    raise ValueError(f"vt {vt}")
+
+def patch_kv_u32(raw_meta, key, new_val):
+    """Переписать u32-значение ключа `key` в сырой метадате (длина не меняется).
+    Нужно чтобы general.file_type соответствовал новому кванту (иначе LM Studio
+    видит рассинхрон типа и может спрятать/отбраковать модель)."""
+    buf = bytearray(raw_meta); kb = key.encode("utf-8"); pos = 0
+    while pos < len(buf):
+        klen = struct.unpack_from("<Q", buf, pos)[0]; p = pos + 8
+        k = bytes(buf[p:p+klen]); p += klen
+        vt = struct.unpack_from("<I", buf, p)[0]; p += 4
+        if k == kb and vt == _U32:
+            struct.pack_into("<I", buf, p, int(new_val) & 0xFFFFFFFF)
+            return bytes(buf)
+        pos = _val_end(buf, p, vt)
+    return bytes(buf)  # ключ не найден — вернуть как есть
+
+# LLAMA_FTYPE: наш выходной квант → значение general.file_type
+FTYPE = {"Q4_0":2, "Q5_0":8, "Q8_0":7, "Q2_K":10, "Q3_K":12, "Q6_K":18}
+
 def read_gguf(path):
     """Вернуть (f, version, raw_meta_bytes, n_kv, tensor_infos, data_start, align).
     tensor_infos: list of (name, dims_tuple_ggml, ggml_type, offset)."""

@@ -354,6 +354,10 @@ def requantize_gguf(src, qn, log=print):
             f"(~{tgt_bits:.1f} бит) = ДВОЙНАЯ потеря — качество LLM просядет.")
         log("   Идеал: брать F16/BF16 или Q8_0 версию модели. Особенно не жми в Q2/Q3.")
     dst = _out_path(src, qn)
+    # синхронизируем general.file_type с новым квантом (иначе LM Studio прячет модель)
+    ft = xgguf.FTYPE.get(qn)
+    if ft is not None:
+        raw_meta = xgguf.patch_kv_u32(raw_meta, "general.file_type", ft)
     log(f"пишу LLM GGUF ({len(out)} тензоров, метадата+токенайзер сохранены)...")
     xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
     log(f"ГОТОВО: {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (реквант {nq}, как-есть {npass})")
