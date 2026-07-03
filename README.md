@@ -58,8 +58,25 @@ With Python instead:
 ```
 python xquant_standalone.py <model.safetensors> [Q4_0|Q3_K|Q2_K]
 ```
-Output: `<model>-<qtype>.gguf` next to the input. Load 2/3/4-bit GGUF with the
-`UnetLoaderGGUF` node in ComfyUI.
+Output: `<model>-<qtype>.gguf` next to the input.
+
+## Loading in ComfyUI
+Copy `comfyui-node/ComfyUI-XQuant` into `ComfyUI/custom_nodes/`. It adds
+**`XQuant GGUF Loader`** — pick a `.gguf` and it dequantizes on load and builds
+the model with ComfyUI's own machinery (`load_diffusion_model_state_dict`), so the
+architecture (FLUX / SD3 / SDXL / …) is auto-detected from the tensor keys. Our
+`Q4_0` GGUF also loads fine with City96's stock `UnetLoaderGGUF`.
+
+### Audio / music models
+The quant kernel is architecture-agnostic, so it can compress audio-diffusion /
+music models too. The catch is the **loader**, not the compression:
+- A model **already in GGUF** (music LLMs, Whisper, MusicGen-GGUF) → the
+  `.gguf → .gguf` requant path shrinks it and it runs in its native llama.cpp /
+  whisper.cpp runtime **today**.
+- An **audio-diffusion `.safetensors`** (Stable Audio, ACE-Step) → XQuant will
+  compress it (arch tag `unknown`), and `XQuant GGUF Loader` will load it **iff
+  ComfyUI recognizes that architecture** from the state-dict. If ComfyUI can run
+  the model natively, the compressed GGUF loads through the same node.
 
 ## License — AGPL-3.0
 Licensed under **GNU AGPL-3.0**. Anyone who uses, modifies, or serves this code
@@ -72,3 +89,7 @@ Apache-2.0 — see `NOTICE`. The standalone engine above uses none of it.)*
 ## Contacts
 For **commercial licensing** and custom integration inquiries, contact me on
 Telegram: **[@GarrysmodMapper](https://t.me/GarrysmodMapper)**.
+
+Try the models in action — our Telegram AI-image bot:
+**[t.me/comfuibot](https://t.me/comfuibot)** (FLUX / Qwen image & video generation,
+running on the very quants this tool produces).

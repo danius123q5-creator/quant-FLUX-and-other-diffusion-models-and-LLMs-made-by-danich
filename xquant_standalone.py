@@ -221,7 +221,8 @@ def detect_arch(keys):
     if any("double_blocks" in k for k in ks): return "flux"
     if any("transformer_blocks" in k for k in ks): return "sd3"
     if any("input_blocks" in k for k in ks): return "sdxl"
-    raise SystemExit("Unknown model architecture")
+    return "unknown"  # незнакомая арх (напр. аудио) — жмём всё равно, метку в GGUF
+                      # пишем "unknown"; загрузка зависит от поддержки в ComfyUI
 
 def strip_prefix(keys):
     for p in ("model.diffusion_model.", "model."):
