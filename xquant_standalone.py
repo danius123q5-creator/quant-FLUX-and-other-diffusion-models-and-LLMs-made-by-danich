@@ -14,30 +14,76 @@ import xquant as xq
 import xgguf                                   # НАШ GGUF-писатель (без чужой gguf-либы)
 
 QUANT_THRESHOLD = 1024
-OUR = {"Q5_0": (xq.our_quantize_q5_0, xgguf.T.Q5_0, 32),
+OUR = {"Q8_0": (xq.our_quantize_q8_0, xgguf.T.Q8_0, 32),
+       "Q6_K": (xq.our_quantize_q6k, xgguf.T.Q6_K, 256),
+       "Q5_0": (xq.our_quantize_q5_0, xgguf.T.Q5_0, 32),
        "Q4_0": (xq.our_quantize_q4_0, xgguf.T.Q4_0, 32),
        "Q3_K": (xq.our_quantize_q3k, xgguf.T.Q3_K, 256),
        "Q2_K": (xq.our_quantize_q2k, xgguf.T.Q2_K, 256)}
 
-def pick_quant_gui(default="Q2_K"):
-    """Окошко-дропдаун выбора битности (при drag-drop без 2-го аргумента)."""
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-    except Exception:
-        return default
-    root = tk.Tk(); root.title("XQuant — выбор битности"); root.geometry("340x150")
-    root.eval('tk::PlaceWindow . center')
-    tk.Label(root, text="Сжать модель в:", font=("Segoe UI", 11)).pack(pady=(16,4))
-    opts = ["5-bit (Q5_0)", "4-bit (Q4_0)", "3-bit (Q3_K)", "2-bit (Q2_K)"]
-    m = {"5-bit (Q5_0)":"Q5_0","4-bit (Q4_0)":"Q4_0","3-bit (Q3_K)":"Q3_K","2-bit (Q2_K)":"Q2_K"}
-    var = tk.StringVar(value="2-bit (Q2_K)")
-    ttk.Combobox(root, textvariable=var, values=opts, state="readonly", width=22).pack(pady=4)
-    res = {"q": None}
-    def go(): res["q"] = m[var.get()]; root.destroy()
-    tk.Button(root, text="Сжать", command=go, width=14, height=1).pack(pady=12)
+_BITS = [("8-бит (Q8_0) — почти без потерь","Q8_0"), ("6-бит (Q6_K) — высокое","Q6_K"),
+         ("5-бит (Q5_0) — высокое","Q5_0"), ("4-бит (Q4_0) — идеал/баланс","Q4_0"),
+         ("3-бит (Q3_K) — компактно","Q3_K"), ("2-бит (Q2_K) — минимум","Q2_K")]
+
+def run_gui(prefill=""):
+    """Полноценное окно: выбор файла + битность + прогресс. Сжатие в потоке."""
+    import tkinter as tk
+    from tkinter import ttk, filedialog
+    import threading, queue
+    root = tk.Tk(); root.title("XQuant — ужиматель моделей")
+    root.geometry("560x420"); root.minsize(520, 380)
+    try: root.eval('tk::PlaceWindow . center')
+    except Exception: pass
+
+    tk.Label(root, text="XQuant", font=("Segoe UI", 18, "bold")).pack(pady=(14,0))
+    tk.Label(root, text="diffusion model quantizer  •  own engine  •  AGPL-3.0",
+             font=("Segoe UI", 9), fg="#888").pack()
+
+    frm = tk.Frame(root); frm.pack(fill="x", padx=18, pady=(14,4))
+    tk.Label(frm, text="Модель (.safetensors):", font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+    path_var = tk.StringVar(value=prefill)
+    ent = tk.Entry(frm, textvariable=path_var, width=48); ent.grid(row=1, column=0, sticky="we", pady=2)
+    def browse():
+        p = filedialog.askopenfilename(filetypes=[("Safetensors","*.safetensors"),("All","*.*")])
+        if p: path_var.set(p)
+    tk.Button(frm, text="Обзор…", command=browse).grid(row=1, column=1, padx=(6,0))
+    frm.columnconfigure(0, weight=1)
+
+    bf = tk.Frame(root); bf.pack(fill="x", padx=18, pady=6)
+    tk.Label(bf, text="Битность:", font=("Segoe UI", 10)).pack(side="left")
+    bit_var = tk.StringVar(value=_BITS[3][0])
+    ttk.Combobox(bf, textvariable=bit_var, values=[b[0] for b in _BITS],
+                 state="readonly", width=32).pack(side="left", padx=8)
+
+    log = tk.Text(root, height=9, width=64, font=("Consolas", 9), bg="#111", fg="#ddd")
+    log.pack(fill="both", expand=True, padx=18, pady=(8,4))
+    q = queue.Queue()
+    def logline(m): q.put(m)
+    btn = tk.Button(root, text="СЖАТЬ", font=("Segoe UI", 11, "bold"), height=1)
+    btn.pack(pady=(0,12))
+
+    def worker(src, qn):
+        try: compress_file(src, qn, logline)
+        except Exception as e: logline(f"ОШИБКА: {e}")
+        q.put(("__done__",))
+    def start():
+        src = path_var.get().strip('"')
+        if not os.path.isfile(src): logline("Выбери файл модели!"); return
+        qn = dict(_BITS)[bit_var.get()]
+        log.delete("1.0","end"); btn.config(state="disabled", text="жму…")
+        threading.Thread(target=worker, args=(src, qn), daemon=True).start()
+    btn.config(command=start)
+
+    def poll():
+        try:
+            while True:
+                m = q.get_nowait()
+                if isinstance(m, tuple): btn.config(state="normal", text="СЖАТЬ")
+                else: log.insert("end", m+"\n"); log.see("end")
+        except queue.Empty: pass
+        root.after(120, poll)
+    poll()
     root.mainloop()
-    return res["q"] or default
 
 # ── детект архитектуры по ключам (без torch; порт city96 keys_detect) ──
 ARCHES = [
@@ -105,45 +151,41 @@ def load_tensors(path):
 
 CRITICAL = xq.is_critical  # универсальная защита слоёв
 
-def main():
-    if len(sys.argv) < 2:
-        print("USAGE: xquant_standalone <model.safetensors> [Q4_0|Q3_K|Q2_K]"); return
-    src = sys.argv[1].strip('"')
-    if not os.path.isfile(src): print("NO FILE:", src); return
-    # 2-й аргумент = битность из консоли; иначе (drag-drop) — окошко-дропдаун
-    qn = sys.argv[2].upper() if len(sys.argv) > 2 else pick_quant_gui()
+def compress_file(src, qn, log=print):
+    """Сжать модель src в битность qn. log(msg) — колбэк прогресса. Возвращает dst."""
     keys = [k for k,_,_,_ in _iter_hdr(src)]
     pfx = strip_prefix(keys)
     arch = detect_arch([k[len(pfx):] if pfx else k for k in keys])
-    print(f"XQUANT: {os.path.basename(src)}  arch={arch}  -> {qn}  (own engine, zero third-party)")
+    log(f"{os.path.basename(src)}  arch={arch}  ->  {qn}")
     fn, ggtype, blk = OUR.get(qn, (None,None,32))
-    nq = nf = 0
-    out = []   # (name, ggml_type, logical_shape, data_bytes)
-    total = 0
+    nq = nf = 0; out = []; total = 0
     for k, dt, shape, raw in load_tensors(src):
-        if pfx and not k.startswith(pfx):
-            continue
+        if pfx and not k.startswith(pfx): continue
         key = k[len(pfx):] if pfx and k.startswith(pfx) else k
-        if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"):
-            continue
+        if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"): continue
         data = _decode(raw, dt, shape)
         nd = len(shape); npm = int(np.prod(shape)) if shape else 1
         if (fn and nd==2 and npm>QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % blk == 0):
-            try:
-                packed = fn(data)                       # наше ядро → упакованные байты
-                out.append((key, ggtype, tuple(shape), packed.tobytes())); nq += 1
-            except Exception:
-                out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data))); nf += 1
+            try: out.append((key, ggtype, tuple(shape), fn(data).tobytes())); nq += 1
+            except Exception: out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data))); nf += 1
         elif nd == 1 or npm <= QUANT_THRESHOLD:
             out.append((key, xgguf.T.F32, tuple(shape), xgguf.enc_f32(data)))
         else:
             out.append((key, xgguf.T.F16, tuple(shape), xgguf.enc_f16(data)))
         total += 1
-        if total % 100 == 0: print(f"  processed {total} tensors...", flush=True)
+        if total % 100 == 0: log(f"  обработано {total} тензоров...")
     dst = os.path.splitext(src)[0] + f"-{qn}.gguf"
-    print(f"writing GGUF ({len(out)} tensors)...")
+    log(f"пишу GGUF ({len(out)} тензоров)...")
     xgguf.write_gguf(dst, arch, out)
-    print(f"quantized: {nq} | F16: {nf}\nDONE: {dst}  {os.path.getsize(src)/1e9:.1f}->{os.path.getsize(dst)/1e9:.1f} GB")
+    log(f"ГОТОВО: {os.path.basename(dst)}  {os.path.getsize(src)/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ")
+    return dst
+
+def main():
+    # CLI: <файл> <битность> → сразу жмём. Иначе → GUI.
+    if len(sys.argv) > 2 and os.path.isfile(sys.argv[1].strip('"')):
+        compress_file(sys.argv[1].strip('"'), sys.argv[2].upper()); return
+    prefill = sys.argv[1].strip('"') if len(sys.argv) > 1 and os.path.isfile(sys.argv[1].strip('"')) else ""
+    run_gui(prefill)
 
 def _iter_hdr(path):
     with open(path,"rb") as f:

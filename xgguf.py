@@ -11,7 +11,7 @@ import struct, numpy as np
 
 # GGML quant types
 class T:
-    F32=0; F16=1; Q4_0=2; Q5_0=6; Q2_K=10; Q3_K=11; BF16=30
+    F32=0; F16=1; Q4_0=2; Q5_0=6; Q8_0=8; Q2_K=10; Q3_K=11; Q6_K=14; BF16=30
 # метадата value-types
 _U32=4; _STR=8; _U64=10
 ALIGN=32

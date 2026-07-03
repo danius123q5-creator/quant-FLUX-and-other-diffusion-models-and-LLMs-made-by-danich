@@ -59,6 +59,21 @@ def our_quantize_q4_0(x: np.ndarray) -> np.ndarray:
     blocks = np.concatenate([d_bytes, qs], axis=1)            # [nb,18]
     return blocks.reshape(-1)
 
+def our_quantize_q8_0(x: np.ndarray) -> np.ndarray:
+    """Наш энкодер Q8_0 (8-бит, почти без потерь). Блок 34 байта/32: fp16 d + 32 int8.
+    Деквант: x = d*q. Побайтово = эталон gguf."""
+    x = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
+    assert x.size % 32 == 0
+    g = x.reshape(-1, 32)
+    amax = np.abs(g).max(axis=1)
+    d = (amax / 127.0).astype(np.float32)
+    d16 = d.astype(np.float16)
+    id_ = np.where(d != 0, 1.0/np.where(d==0,1,d), 0.0).astype(np.float32)  # ПОЛНЫЙ d
+    q = np.round(g * id_[:, None]).clip(-128, 127).astype(np.int8)
+    d_bytes = d16.view(np.uint8).reshape(-1, 2)
+    blocks = np.concatenate([d_bytes, q.view(np.uint8)], axis=1)            # [nb,34]
+    return blocks.reshape(-1)
+
 QK5_0 = 32
 def our_quantize_q5_0(x: np.ndarray) -> np.ndarray:
     """Наш энкодер Q5_0 (5-бит, GGML). Блок 22 байта/32: fp16 d + 4 qh + 16 qs.
@@ -82,6 +97,48 @@ def our_quantize_q5_0(x: np.ndarray) -> np.ndarray:
     qh_bytes = qh.view(np.uint8).reshape(-1, 4)                        # LE
     blocks = np.concatenate([d_bytes, qh_bytes, qs], axis=1)          # [nb,22]
     return blocks.reshape(-1)
+
+def our_quantize_q6k(x: np.ndarray) -> np.ndarray:
+    """Наш энкодер GGML Q6_K (6-бит K-квант, 210 байт/256). Обратный к
+    ComfyUI dequantize_blocks_Q6_K. Проверяется round-trip через их декодер."""
+    x = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
+    assert x.size % QK_K == 0
+    nb = x.size // QK_K
+    xb = x.reshape(nb, QK_K)
+    out = np.zeros((nb, 210), dtype=np.uint8)
+    # индекс суб-блока (0..15) для каждой из 256 позиций (раскладка ggml Q6_K)
+    subidx = np.zeros(QK_K, dtype=np.int64)
+    for p in range(QK_K):
+        n = p // 128; o = p % 128; m = o // 32; l = o % 32
+        subidx[p] = (l // 16) + 2*m + 8*n
+    for bi in range(nb):
+        w = xb[bi]
+        # scale на суб-блок = absmax/32
+        lsc = np.zeros(16, np.float32)
+        for s in range(16):
+            mask = subidx == s
+            lsc[s] = np.abs(w[mask]).max() / 32.0
+        d = max(lsc.max(), 1e-8) / 127.0
+        d16 = np.float16(d); d = float(d16)
+        sc = np.clip(np.round(lsc / d), -128, 127).astype(np.int8)
+        # q6 для каждой позиции
+        eff = d * sc[subidx].astype(np.float32)
+        eff[eff == 0] = 1e-8
+        q = np.clip(np.round(w / eff) + 32, 0, 63).astype(np.int32)
+        # упаковка ql[128]+qh[64] по 2 группам 128
+        ql = np.zeros(128, np.uint8); qh = np.zeros(64, np.uint8)
+        for grp in range(2):
+            n = grp*128; qlo = grp*64; qho = grp*32
+            for l in range(32):
+                q1=q[n+l]; q2=q[n+l+32]; q3=q[n+l+64]; q4=q[n+l+96]
+                ql[qlo+l]    = (q1 & 0xF) | ((q3 & 0xF) << 4)
+                ql[qlo+l+32] = (q2 & 0xF) | ((q4 & 0xF) << 4)
+                qh[qho+l] = ((q1>>4)&3) | (((q2>>4)&3)<<2) | (((q3>>4)&3)<<4) | (((q4>>4)&3)<<6)
+        out[bi, 0:128] = ql
+        out[bi, 128:192] = qh
+        out[bi, 192:208] = sc.view(np.uint8)
+        out[bi, 208:210] = np.array([d16], np.float16).view(np.uint8)
+    return out.reshape(-1)
 
 def our_dequantize_q4_0(blocks: np.ndarray, n: int) -> np.ndarray:
     """Обратно (для проверки/замера ошибки)."""
