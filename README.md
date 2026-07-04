@@ -77,6 +77,22 @@ one out — our symmetric 3-bit encode grains more than 2-bit, so skip it.
 **Post-hoc quantization floor ≈ 2-bit.** Below that (ternary 1.6-bit) quality
 collapses without quantization-aware training.
 
+### Showcase — 2-bit vs 4-bit (FLUX.1-dev)
+![Q2_K vs Q4_0](media/q2_vs_q4.png)
+
+Left **Q2_K (4.0 GB)**, right **Q4_0 (6.4 GB)** — same prompt, same seed. Even at
+2-bit the render stays clean: straight masts, sharp planks, no sky grain; the
+close-up keeps skin pores, brow/beard strands and catch-lights in the eyes. Q4_0 is
+a touch crisper on the very finest hairs, for +2.4 GB.
+
+> **Honest note:** this is a *quality* showcase, not a pixel-identical A/B. 2-bit
+> perturbs the weights enough that the same seed takes a slightly different latent
+> path (the man turns to a different pose), so the two frames aren't the same
+> composition — they show that 2-bit holds *fidelity*, not that it reproduces the
+> exact fp16 image. Q2_K here is the standard GGML Q2_K format, just encoded well
+> with critical-layer protection from the bf16 source — no new magic, solid
+> engineering.
+
 ## Usage
 **Easiest — the standalone `XQuant.exe`** (20 MB, no Python needed, numpy bundled):
 drag a `.safetensors` model onto `XQuant.exe` → get `<model>-Q2_K.gguf` next to it.
