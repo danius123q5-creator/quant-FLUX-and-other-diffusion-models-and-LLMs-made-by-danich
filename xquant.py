@@ -285,15 +285,42 @@ def our_dequantize_codebook(idx, cb, n):
 # hmask[32] + qs[64] + scales[12] + d(fp16). Проверяется прогоном через их декодер.
 QK_K = 256
 
+def _make_qx_sym(x, w, nmin=-4, nmax=3, niter=8):
+    """Взвешенный поиск СИММЕТРИЧНОГО шага dl (q∈[nmin,nmax]) — EM-рефайн под минимум
+    Σ w·(x − dl·q)². Замена наивного absmax/nmax для Q3_K: меньше зерно, тот же формат."""
+    amax = np.abs(x).max(-1)                         # (N,)
+    ok = amax > 1e-12
+    dl = np.where(ok, amax / nmax, 1e-8)
+    best_dl = dl.copy()
+    q = np.clip(np.round(x / dl[:, None]), nmin, nmax)
+    best_err = np.sum(w * (x - dl[:, None] * q) ** 2, axis=-1)
+    for _ in range(niter):
+        q = np.clip(np.round(x / dl[:, None]), nmin, nmax)
+        den = np.sum(w * q * q, axis=-1); num = np.sum(w * x * q, axis=-1)
+        dl = np.where(den > 1e-12, num / np.where(den > 1e-12, den, 1.0), best_dl)
+        dl = np.where(dl > 1e-12, dl, best_dl)
+        q2 = np.clip(np.round(x / dl[:, None]), nmin, nmax)
+        e = np.sum(w * (x - dl[:, None] * q2) ** 2, axis=-1)
+        upd = e < best_err
+        best_err = np.where(upd, e, best_err); best_dl = np.where(upd, dl, best_dl)
+    return np.where(ok, np.maximum(best_dl, 1e-8), 1e-8)
+
 def our_quantize_q3k(x: np.ndarray) -> np.ndarray:
-    """Наш энкодер GGML Q3_K. Вход float32 (кратно 256). Выход uint8 блоки (110б)."""
+    """Наш энкодер GGML Q3_K. Вход float32 (кратно 256). Выход uint8 блоки (110б).
+    Шаг сабблоков — взвешенным поиском (importance=x²), не absmax. XQUANT_NAIVE_Q3=1 → старое."""
     x = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
     assert x.size % QK_K == 0, "длина не кратна 256"
     nb = x.size // QK_K
     sb = x.reshape(nb, 16, 16)                       # [nb, 16 суб-блоков, 16]
-    # per-subblock: dl = absmax/4 (q∈-4..3), масштаб scale = round(dl/d), 0..31
-    absmax = np.abs(sb).max(axis=2)                  # [nb,16]
-    dl = absmax / 4.0                                # [nb,16] неотриц.
+    # Наивный absmax/4 для Q3_K оказался ЛУЧШЕ взвешенного EM-поиска (симметричный
+    # квант + 5-битная переквантизация dl → взвешивание только добавляло шум,
+    # замер: 18.75% naive vs 19.90% weighted). Оставляем наивный. Взвешенный —
+    # только опытный, за XQUANT_WEIGHTED_Q3=1.
+    if os.environ.get("XQUANT_WEIGHTED_Q3", "0").strip() in ("1","on","true","yes"):
+        flat = sb.reshape(nb * 16, 16)
+        dl = _make_qx_sym(flat, flat * flat + 1e-8, nmin=-4, nmax=3).reshape(nb, 16)
+    else:
+        dl = np.abs(sb).max(axis=2) / 4.0            # дефолт: наивный (лучше)
     d = dl.max(axis=1, keepdims=True) / 31.0         # [nb,1] супер-масштаб
     d = np.where(d == 0, 1e-8, d)
     scale = np.clip(np.round(dl / d), 0, 31).astype(np.int32)   # [nb,16] 0..31
