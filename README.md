@@ -5,6 +5,25 @@ Compress diffusion models (FLUX / SDXL / SD1.5 / SD3 / Qwen-Image / Wan …) to
 our own GGML-byte-exact kernel, our own GGUF writer, our own architecture detection.
 Drop a `bf16`/`fp16` model, get a compressed `.gguf` that runs in ComfyUI.
 
+## Two modes
+
+**🏆 Premium mode — `safetensors (bf16) → Q4_0`.** Uncompromising, magazine-grade
+visuals. The model shrinks ~4× yet renders indistinguishably from the original,
+because the quantizer works from the **full-precision source** and keeps the
+critical layers (input embeddings, VAE output projection, norms) in `bf16`
+straight from that source — nothing lossy ever touches them. This is the mode you
+want for actual generation quality.
+
+**♻️ Eco / Emergency mode — `GGUF → GGUF`.** Ultra-fast **local** re-compression of
+a model you *already have* as a `.gguf` — no need to re-download the 15–24 GB
+originals. Reads any source quant (`Q4_K_M`, `Q6_K`, …), repacks smaller, keeps the
+tokenizer/metadata verbatim. Built for **weak PCs and slow internet**: save disk in
+minutes, no giant downloads. Quality is capped by the source (re-quantizing an
+already-lossy file compounds error) — so it's for *space*, not for *max fidelity*.
+
+> Rule of thumb: **Premium** when you have the `bf16`/`fp16` original and want the
+> best picture; **Eco** when you only have a `.gguf` and want it smaller, fast.
+
 ## Zero third-party engine
 The standalone engine depends on **numpy only** — no `llama.cpp`, no `gguf` library,
 no City96 `convert.py`, no torch:
