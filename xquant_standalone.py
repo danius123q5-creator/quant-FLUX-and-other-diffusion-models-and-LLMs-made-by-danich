@@ -176,6 +176,9 @@ def run_gui(prefill=""):
     btn.pack(side="left", padx=4)
     test_btn = tk.Button(btnrow, text="🧪 Тест качества", font=("Segoe UI", 10), height=1)
     test_btn.pack(side="left", padx=4)
+    real_btn = tk.Button(btnrow, text="🖼 Реал-тест", font=("Segoe UI", 10), height=1)
+    real_btn.pack(side="left", padx=4)
+    _imgrefs = []   # держим ссылки на PhotoImage, иначе GC съест картинки
 
     def worker(src, qn):
         # сжатие в ОТДЕЛЬНОМ процессе, прогресс через файл → GUI не фризит совсем
@@ -239,6 +242,40 @@ def run_gui(prefill=""):
         threading.Thread(target=w, daemon=True).start()
     test_btn.config(command=run_test)
 
+    def show_images(results):
+        # показать сгенерированные кадры рядом в отдельном окне (главный поток)
+        if not results:
+            return
+        win = tk.Toplevel(root); win.title("Реал-тест — сравнение кадров")
+        win.configure(bg="#111")
+        row = tk.Frame(win, bg="#111"); row.pack(padx=10, pady=10)
+        for label, path in results:
+            col = tk.Frame(row, bg="#111"); col.pack(side="left", padx=6)
+            tk.Label(col, text=label, fg="#ddd", bg="#111", font=("Segoe UI", 11, "bold")).pack()
+            try:
+                img = tk.PhotoImage(file=path)          # Tk 8.6 читает PNG
+                while img.width() > 460:                 # ужать до вменяемого превью
+                    img = img.subsample(2)
+                _imgrefs.append(img)                     # защита от GC
+                tk.Label(col, image=img, bg="#111").pack()
+            except Exception as e:
+                tk.Label(col, text=f"(не показать: {e})", fg="#f88", bg="#111").pack()
+            tk.Label(col, text=os.path.basename(path), fg="#666", bg="#111", font=("Consolas",7)).pack()
+
+    def run_realtest():
+        src = path_var.get().strip('"')
+        if not os.path.isfile(src): logline("Выбери файл модели!"); return
+        log.delete("1.0","end")
+        btn.config(state="disabled"); test_btn.config(state="disabled")
+        real_btn.config(state="disabled", text="генерю…")
+        def w():
+            res = []
+            try: res = real_gen_test(src, logline)
+            except Exception as e: logline(f"ОШИБКА реал-теста: {e}")
+            finally: q.put(("__images__", res))
+        threading.Thread(target=w, daemon=True).start()
+    real_btn.config(command=run_realtest)
+
     last_prog = [False]   # прошлая строка была прогресс-тиком → обновляем на месте
     def poll():
         try:
@@ -247,7 +284,11 @@ def run_gui(prefill=""):
                 if isinstance(m, tuple):
                     btn.config(state="normal", text="СЖАТЬ")
                     test_btn.config(state="normal", text="🧪 Тест качества")
+                    real_btn.config(state="normal", text="🖼 Реал-тест")
                     last_prog[0] = False
+                    if m and m[0] == "__images__":
+                        try: show_images(m[1])
+                        except Exception as _se: log.insert("end", f"показ не удался: {_se}\n")
                 else:
                     is_prog = ("тензоров..." in m and "/" in m)   # «обработано N/M тензоров...»
                     if is_prog and last_prog[0]:
@@ -512,6 +553,105 @@ def quality_test(src, log=print, sample=40, rows_cap=768):
         log(f"{qn:6}  {_BPW[qn]:.2f}       {rel*100:5.1f}%       {psnr:5.1f} dB   {_verdict(psnr)}")
     log("-" * 60)
     log(f"меньше отклонение / выше PSNR = чище фото. Готово за {_fmt_dur(time.time()-t0)}")
+
+# ═══════════ РЕАЛ-ТЕСТ: настоящая генерация через локальный ComfyUI ═══════════
+# exe без GPU, но шлёт FLUX-воркфлоу в живой ComfyUI (:8000) и тащит PNG'и —
+# реальное сравнение кадров на разных квантах твоей модели.
+def _comfy_url():
+    return os.environ.get("XQUANT_COMFY_URL", "http://127.0.0.1:8000").rstrip("/")
+
+def _http_json(url, timeout=8):
+    import urllib.request
+    return json.load(urllib.request.urlopen(url, timeout=timeout))
+
+def _comfy_alive(url):
+    try: _http_json(url + "/system_stats", timeout=4); return True
+    except Exception: return False
+
+def _obj_options(url, cls, field):
+    try:
+        d = _http_json(f"{url}/object_info/{cls}", timeout=6)
+        return d[cls]["input"]["required"][field][0] or []
+    except Exception: return []
+
+def _pick(cands, subs):
+    for s in subs:
+        for c in cands:
+            if s.lower() in c.lower(): return c
+    return None
+
+_REAL_PROMPT = ("Photograph, a weathered old fisherman with a deeply lined face, grey "
+    "stubble, sharp eyes, yellow raincoat, harbor at golden hour, fishing boats behind, "
+    "fine skin pores, sharp focus, documentary photo, 8K")
+
+def _flux_workflow(unet, t5, clipl, vae, seed, prompt, px=768):
+    return {
+      "1":{"class_type":"UnetLoaderGGUF","inputs":{"unet_name":unet}},
+      "2":{"class_type":"DualCLIPLoader","inputs":{"clip_name1":t5,"clip_name2":clipl,"type":"flux"}},
+      "3":{"class_type":"VAELoader","inputs":{"vae_name":vae}},
+      "4":{"class_type":"CLIPTextEncode","inputs":{"clip":["2",0],"text":prompt}},
+      "5":{"class_type":"FluxGuidance","inputs":{"conditioning":["4",0],"guidance":3.5}},
+      "6":{"class_type":"CLIPTextEncode","inputs":{"clip":["2",0],"text":""}},
+      "7":{"class_type":"EmptySD3LatentImage","inputs":{"width":px,"height":px,"batch_size":1}},
+      "8":{"class_type":"KSampler","inputs":{"model":["1",0],"seed":seed,"steps":20,"cfg":1.0,
+            "sampler_name":"euler","scheduler":"simple","positive":["5",0],"negative":["6",0],
+            "latent_image":["7",0],"denoise":1.0}},
+      "9":{"class_type":"VAEDecode","inputs":{"samples":["8",0],"vae":["3",0]}},
+      "10":{"class_type":"SaveImage","inputs":{"images":["9",0],"filename_prefix":"xq_realtest"}}}
+
+def real_gen_test(src, log=print, seed=42):
+    """Найти сжатые кванты модели в ComfyUI и сгенерить один сид на каждом.
+    Возвращает список (label, png_path). FLUX-only (воркфлоу FLUX-специфичен)."""
+    import urllib.request, urllib.parse, tempfile
+    url = _comfy_url()
+    if not _comfy_alive(url):
+        log(f"ComfyUI не отвечает на {url}. Запусти пул (:8000) или задай XQUANT_COMFY_URL."); return []
+    base = os.path.splitext(os.path.basename(src))[0]        # flux1-dev
+    unets = _obj_options(url, "UnetLoaderGGUF", "unet_name")
+    def _is_quant_of(u):
+        b = os.path.basename(u)
+        if not (b.startswith(base+"-") and b.endswith(".gguf")): return False
+        core = b[len(base)+1:-5]                              # между 'base-' и '.gguf'
+        if "-" in core or "_" in core.split("Q",1)[0]: return False  # -kontext- и пр. варианты — не наши
+        return bool(re.match(r"(OUR)?Q\d", core, re.I))       # Q4_0 / Q3_K / OURQ2K, но не 'kontext'
+    mine = sorted([u for u in unets if _is_quant_of(u)])
+    if not mine:
+        log(f"в ComfyUI нет сжатых квантов '{base}-Q*.gguf'. Сожми модель (СЖАТЬ) в нужные биты."); return []
+    t5   = _pick(_obj_options(url,"DualCLIPLoader","clip_name1"), ["t5xxl_fp8","t5xxl","t5-xxl"])
+    clipl= _pick(_obj_options(url,"DualCLIPLoader","clip_name2"), ["clip_l.","clip-l.","/clip_l"])
+    vae  = _pick(_obj_options(url,"VAELoader","vae_name"), ["ae.safetensors","flux","ae."])
+    if not (t5 and clipl and vae):
+        log(f"не нашёл FLUX CLIP/VAE в ComfyUI (t5={t5} clip_l={clipl} vae={vae})."); return []
+    log(f"ComfyUI ok. Кванты: {len(mine)} → {[os.path.basename(m) for m in mine]}")
+    log(f"CLIP={os.path.basename(t5)}+{os.path.basename(clipl)} VAE={os.path.basename(vae)} seed={seed}")
+    out = []
+    for u in mine[:4]:                                       # максимум 4, чтоб не ждать вечность
+        label = os.path.basename(u).replace(base+"-","").replace(".gguf","")
+        log(f"генерю {label}...")
+        t0 = time.time()
+        try:
+            wf = _flux_workflow(u, t5, clipl, vae, seed, _REAL_PROMPT)
+            d = json.dumps({"prompt":wf}).encode()
+            pid = json.load(urllib.request.urlopen(urllib.request.Request(
+                url+"/prompt", data=d, headers={"Content-Type":"application/json"}), timeout=30))["prompt_id"]
+            fn = sub = None; tend = time.time()+300
+            while time.time() < tend:
+                h = _http_json(f"{url}/history/{pid}", timeout=15)
+                if pid in h:
+                    for o in h[pid]["outputs"].values():
+                        if "images" in o: fn=o["images"][0]["filename"]; sub=o["images"][0]["subfolder"]; break
+                    if fn: break
+                time.sleep(2)
+            if not fn: log(f"  {label}: таймаут"); continue
+            q = urllib.parse.urlencode({"filename":fn,"subfolder":sub or "","type":"output"})
+            png = urllib.request.urlopen(url+"/view?"+q, timeout=30).read()
+            p = os.path.join(tempfile.gettempdir(), f"xqreal_{label}.png")
+            open(p,"wb").write(png)
+            out.append((label, p))
+            log(f"  {label}: готово за {_fmt_dur(time.time()-t0)}")
+        except Exception as e:
+            log(f"  {label}: ошибка {e}")
+    return out
 
 def main():
     # CLI: <файл> <битность> [progfile] → жмём. Иначе → GUI.

@@ -77,6 +77,13 @@ Weight PSNR isn't linear with image quality, so the thresholds are tuned so
 "clean" ends where FLUX renders actually start to grain — Q4_0 is the practical
 floor for indistinguishable FLUX.
 
+### Real-generation test (🖼)
+If a local ComfyUI is running (`:8000`, or `XQUANT_COMFY_URL`), the **🖼 Real-test**
+button generates the *same* prompt+seed on every compressed quant of your model it
+finds in ComfyUI (FLUX; auto-detects the CLIP/VAE) and shows the actual frames
+side by side — a real photo A/B, not just PSNR. Compress the bit levels first, then
+click it.
+
 ## Loading in ComfyUI
 Copy `comfyui-node/ComfyUI-XQuant` into `ComfyUI/custom_nodes/`. It adds
 **`XQuant GGUF Loader`** — pick a `.gguf` and it dequantizes on load and builds
