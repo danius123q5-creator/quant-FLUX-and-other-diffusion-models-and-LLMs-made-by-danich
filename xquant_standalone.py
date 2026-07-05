@@ -427,15 +427,32 @@ def _bin_per_channel(w2d, outlier_p=0.02):
     return rf.reshape(w2d.shape)
 
 def _q4_roundtrip(data, shape):
-    """Q4_0 квант→деквант (attention держим в 4 битах). Возвращает fp32."""
+    """Q4_0 квант→деквант (запасной путь). Возвращает fp32."""
     blk = xq.our_quantize_q4_0(np.ascontiguousarray(data, np.float32).reshape(-1))
     return xgguf._deq_q4_0(blk.tobytes(), int(np.prod(shape)))
+
+# «Коробка» (incoherence rotation, QuIP-стиль) — спасает ХРУПКИЙ attention в 1-бит.
+# Поворот весов R перед бинаром размазывает выбросы → per-row шкала не врёт →
+# 1-бит attention рендерит лицо, а не мёртвую «ткань». R детерминирован по сиду
+# (хранить не надо — при реальной упаковке это Адамар/сид). См. RESEARCH-1bit-flux.md.
+_BOX_R = {}
+def _get_R(d):
+    if d not in _BOX_R:
+        rng = np.random.default_rng(1234 + d)
+        Q, _ = np.linalg.qr(rng.standard_normal((d, d)).astype(np.float32))
+        _BOX_R[d] = Q.astype(np.float32)
+    return _BOX_R[d]
+def _box_bin(W2d, outlier_p=0.02):
+    """Пер-канальный бинар В КОРОБКЕ: W_eff = bin(W·R)·Rᵀ."""
+    R = _get_R(W2d.shape[1])
+    return (_bin_per_channel(W2d @ R, outlier_p) @ R.T).astype(np.float32)
 
 def compress_1bit(src, qn, log=print):
     """Q1 (experimental): MLP→1-бит, attn→Q4, критика→fp16. Стриминг sim-safetensors."""
     t0 = time.time()
     log("!! Q1 — ЭКСПЕРИМЕНТАЛЬНЫЙ режим (research-only).")
-    log("   Рецепт из нашего 1-бит исследования: MLP -> 1-бит, attention -> Q4, критика -> fp16.")
+    log("   Рецепт из нашего 1-бит исследования (RESEARCH-1bit-flux.md): MLP -> 1-бит,")
+    log("   attention -> 1-бит В КОРОБКЕ (ортогон. поворот спасает хрупкий attn), adaLN/критика -> fp16.")
     log("   Вывод: sim-safetensors в fp16 (ПОЛНЫЙ размер, НЕ сжатие — в GGUF нет 1-бит типа).")
     log("   Это ДЕМО КАЧЕСТВА экстремального кванта, не для продакшена. Деплой-дно = Q2_K.")
     keys = [k for k,_,_,_ in _iter_hdr(src)]
@@ -450,7 +467,7 @@ def compress_1bit(src, qn, log=print):
         off += nb
     hj = json.dumps(hdr, separators=(",",":")).encode("utf-8"); hj += b" "*((8-len(hj)%8)%8)
     dst = os.path.splitext(_out_path(src, qn))[0] + ".safetensors"
-    n_total = len(hdr); nbin = nq4 = nkeep = 0; done = 0
+    n_total = len(hdr); nbin = nbox = nkeep = 0; done = 0
     with open(dst, "wb") as w:
         w.write(struct.pack("<Q", len(hj))); w.write(hj)
         for k, dt, shape, raw in load_tensors(src):
@@ -463,15 +480,15 @@ def compress_1bit(src, qn, log=print):
                 if "mlp" in nl:
                     rec = _bin_per_channel(np.ascontiguousarray(data, np.float32).reshape(shape)); nbin += 1
                 elif "attn" in nl:
-                    rec = _q4_roundtrip(data, shape); nq4 += 1
+                    rec = _box_bin(np.ascontiguousarray(data, np.float32).reshape(shape)); nbox += 1
                 else:
-                    rec = data; nkeep += 1
+                    rec = data; nkeep += 1        # modulation/adaLN и прочее — fp16 (не трогаем)
             else:
                 rec = data; nkeep += 1
             w.write(np.ascontiguousarray(rec, np.float32).astype(np.float16).tobytes()); del data, rec
             done += 1
-            if done % 10 == 0: log(f"  обработано {done}/{n_total} (MLP-бинар {nbin}, attn-Q4 {nq4})...")
-    log(f"ГОТОВО (sim): {os.path.basename(dst)}  MLP-бинар={nbin}, attn-Q4={nq4}, fp16={nkeep}  за {_fmt_dur(time.time()-t0)}")
+            if done % 10 == 0: log(f"  обработано {done}/{n_total} (MLP-бинар {nbin}, attn-box {nbox})...")
+    log(f"ГОТОВО (sim): {os.path.basename(dst)}  MLP-бинар={nbin}, attn-box={nbox}, fp16={nkeep}  за {_fmt_dur(time.time()-t0)}")
     log("   ЗАГРУЗКА: обычный UNETLoader (это fp16-safetensors). Ждать деградацию — это 1-бит демо.")
     return dst
 
@@ -550,7 +567,7 @@ def requantize_gguf_1bit(src, qn, log=print):
     log("   не сжатие). Реальное дно для деплоя LLM = Q2_K/Q3_K. Это для оценки, не продакшн.")
     f, ver, raw_meta, n_kv, tinfos, data_start, align = xgguf.read_gguf(src)
     fsize = os.path.getsize(src); offs = [t[3] for t in tinfos]
-    out = []; nbin = nq4 = npass = 0
+    out = []; nbin = nbox = npass = 0
     for i, (name, dims, tt, off) in enumerate(tinfos):
         start = data_start + off
         end = data_start + offs[i+1] if i+1 < len(tinfos) else fsize
@@ -568,15 +585,16 @@ def requantize_gguf_1bit(src, qn, log=print):
             data = xgguf.dec_source(raw, tt, nelem)
             if data is None: out.append((name, tt, dims, raw)); npass += 1
             else:
-                out.append((name, xgguf.T.Q4_0, dims, xq.our_quantize_q4_0(np.ascontiguousarray(data, np.float32).reshape(-1)).tobytes())); nq4 += 1
+                rec = _box_bin(np.ascontiguousarray(data, np.float32).reshape(shape))
+                out.append((name, xgguf.T.F16, dims, xgguf.enc_f16(rec))); nbox += 1
         else:
             out.append((name, tt, dims, raw)); npass += 1
-        if (i+1) % 10 == 0: log(f"  обработано {i+1}/{len(tinfos)} (ffn-бинар {nbin}, attn-Q4 {nq4})...")
+        if (i+1) % 10 == 0: log(f"  обработано {i+1}/{len(tinfos)} (ffn-бинар {nbin}, attn-box {nbox})...")
     f.close()
     dst = os.path.splitext(_out_path(src, qn))[0] + ".gguf"
     log("пишу LLM GGUF (Q1 демо, метадата+токенайзер сохранены)...")
     xgguf.write_gguf_raw(dst, raw_meta, n_kv, out)
-    log(f"ГОТОВО (Q1 демо): {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (ffn-бинар {nbin}, attn-Q4 {nq4}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
+    log(f"ГОТОВО (Q1 демо): {os.path.basename(dst)}  {fsize/1e9:.1f} -> {os.path.getsize(dst)/1e9:.1f} ГБ  (ffn-бинар {nbin}, attn-box {nbox}, как-есть {npass})  за {_fmt_dur(time.time()-t0)}")
     return dst
 
 def process(src, qn, log=print):
@@ -724,8 +742,27 @@ def real_gen_test(src, log=print, seed=42):
         if "-" in core or "_" in core.split("Q",1)[0]: return False  # -kontext- и пр. варианты — не наши
         return bool(re.match(r"(OUR)?Q\d", core, re.I))       # Q4_0 / Q3_K / OURQ2K, но не 'kontext'
     mine = sorted([u for u in unets if _is_quant_of(u)])
+    # ДОсобрать недостающие кванты из ВЫБРАННОЙ модели, чтобы A/B был полным.
+    # Целевой набор — как в таблице результатов (Q4/Q3/Q2). Готовые не пересобираем.
+    _TARGET = ["Q4_0", "Q3_K", "Q2_K"]
+    _have = set()
+    for u in mine:
+        _have.add(os.path.basename(u)[len(base)+1:-5].upper().replace("OUR", ""))
+    _missing = [lv for lv in _TARGET if lv.upper() not in _have]
+    if _missing:
+        model_dir = os.path.dirname(os.path.abspath(src))
+        _prev = os.environ.get("XQUANT_OUT_DIR", "")
+        os.environ["XQUANT_OUT_DIR"] = model_dir              # класть рядом (ComfyUI видит)
+        for lv in _missing:
+            log(f"кванта {lv} нет — собираю из {os.path.basename(src)} (несколько минут)...")
+            try: process(src, lv, log)
+            except Exception as e: log(f"  не собрал {lv}: {e}")
+        if _prev: os.environ["XQUANT_OUT_DIR"] = _prev
+        else: os.environ.pop("XQUANT_OUT_DIR", None)
+        unets = _obj_options(url, "UnetLoaderGGUF", "unet_name")  # перечитать после сборки
+        mine = sorted([u for u in unets if _is_quant_of(u)])
     if not mine:
-        log(f"в ComfyUI нет сжатых квантов '{base}-Q*.gguf'. Сожми модель (СЖАТЬ) в нужные биты."); return []
+        log(f"нет квантов '{base}-Q*.gguf' и собрать не вышло. Нужна bf16/fp16 модель как источник."); return []
     t5   = _pick(_obj_options(url,"DualCLIPLoader","clip_name1"), ["t5xxl_fp8","t5xxl","t5-xxl"])
     clipl= _pick(_obj_options(url,"DualCLIPLoader","clip_name2"), ["clip_l.","clip-l.","/clip_l"])
     vae  = _pick(_obj_options(url,"VAELoader","vae_name"), ["ae.safetensors","flux","ae."])
