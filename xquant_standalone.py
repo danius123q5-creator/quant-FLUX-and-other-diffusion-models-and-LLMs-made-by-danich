@@ -733,6 +733,17 @@ def real_gen_test(src, log=print, seed=42):
         log(f"не нашёл FLUX CLIP/VAE в ComfyUI (t5={t5} clip_l={clipl} vae={vae})."); return []
     log(f"ComfyUI ok. Кванты: {len(mine)} → {[os.path.basename(m) for m in mine]}")
     log(f"CLIP={os.path.basename(t5)}+{os.path.basename(clipl)} VAE={os.path.basename(vae)} seed={seed}")
+    # Папка результатов на ЭТОТ прогон: <модель>_realtest_<время>, внутри —
+    # по фото на каждый квант (один промпт+сид) + prompt.txt. 2026-07-05.
+    _rt_root = os.environ.get("XQUANT_OUT_DIR", "").strip() or os.path.dirname(os.path.abspath(src))
+    rt_dir = os.path.join(_rt_root, f"{base}_realtest_{time.strftime('%Y%m%d_%H%M%S')}")
+    try:
+        os.makedirs(rt_dir, exist_ok=True)
+        with open(os.path.join(rt_dir, "prompt.txt"), "w", encoding="utf-8") as pf:
+            pf.write(f"model: {base}\nseed: {seed}\nprompt:\n{_REAL_PROMPT}\n")
+        log(f"папка результатов: {rt_dir}")
+    except Exception as e:
+        log(f"не создал папку результатов ({e}) — сохраняю во временную"); rt_dir = tempfile.gettempdir()
     out = []
     for u in mine[:4]:                                       # максимум 4, чтоб не ждать вечность
         label = os.path.basename(u).replace(base+"-","").replace(".gguf","")
@@ -754,7 +765,7 @@ def real_gen_test(src, log=print, seed=42):
             if not fn: log(f"  {label}: таймаут"); continue
             q = urllib.parse.urlencode({"filename":fn,"subfolder":sub or "","type":"output"})
             png = urllib.request.urlopen(url+"/view?"+q, timeout=30).read()
-            p = os.path.join(tempfile.gettempdir(), f"xqreal_{label}.png")
+            p = os.path.join(rt_dir, f"{label}.png")          # фото кванта в папку прогона
             open(p,"wb").write(png)
             out.append((label, p))
             log(f"  {label}: готово за {_fmt_dur(time.time()-t0)}")
