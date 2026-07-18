@@ -82,9 +82,19 @@ total weight distortion **~19 % at equal size**. Works for every base
 |---|---|---|
 | **⚖ Balance** (default) | protect salient / squeeze dumb, size-neutral | same size, better image |
 | **🤏 Shrink** | squeeze dumb harder — the dumbest go **down two steps** (`Q4_0→Q2_K`), few upgrades | **smaller file**, salient still protected |
+| **📦 Q3** | moderately press dumb layers down, keep salient — targets ~Q3 size with a living image | **compact**, keeps quality |
 | **🔥 Extreme shrink** | press ~85 % of layers down, most of them two steps | **smallest file**, quality traded for size |
 | **💎 Quality** | upgrade more salient layers, few downgrades | a bit bigger, max fidelity |
 | **▦ Flat** | uniform quant, no reallocation | legacy behaviour |
+
+**Real sizes (FLUX.1-dev):** `Q2_K` ≈ **4.5 GB**, `Q3_K` ≈ **5.3–5.8 GB**, `Q4_0` ≈ **6.3 GB**.
+The real size win is **Q2_K (−29 %)**, not Q3 (Q3 saves only 0.5–1 GB vs Q4).
+
+**Visual test verdict (2026-07-19):** error metrics (cosine / weighted error) **massively
+overstate** low-bit damage. Weighted error screamed "Q3 = 413 % of Q4" — yet by eye Q3 is
+perfectly usable, the image doesn't fall apart. imatrix gives a visible edge (cleaner skin,
+no artifacts), most of all on **Q2** (where it guards the activation outliers that data-free
+methods can't see). Judge quality **by eye, not by the metric**.
 
 ## imatrix — activation-aware importance (AWQ-grade)
 SMART reads importance from the *weights*. **imatrix** reads it from the

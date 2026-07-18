@@ -123,22 +123,28 @@ _SMART_MODES = {
                 "ru":"Баланс — тот же размер, лучше картинка"},
     "shrink":  {"up":0.10, "dn":0.55, "two":0.5, "budget":0.25,
                 "ru":"Ширинка — меньше файл, важные целы"},
+    # Q3 — компактный пресет: умеренно тянет тупые слои вниз, важные бережёт,
+    # цель ≈ Q3-размер при живой картинке (визуально подтверждено 2026-07-19).
+    "q3":      {"up":0.15, "dn":0.50, "two":0.35, "budget":0.35,
+                "ru":"Q3 — компактный, держит качество"},
     "extreme": {"up":0.04, "dn":0.85, "two":0.85, "budget":0.08,
                 "ru":"Экстрим-ширинка — максимум сжатия"},
     "quality": {"up":0.45, "dn":0.15, "two":0.0, "budget":4.0,
                 "ru":"Качество — чуть больше, максимум"},
 }
-_SMART_MODE_ORDER = ["balance", "shrink", "extreme", "quality"]
+_SMART_MODE_ORDER = ["balance", "shrink", "q3", "extreme", "quality"]
 
 # Подписи режимов для дроп-дауна GUI (+ «Плоский» = flat, отключает SMART)
 _MODE_LABELS = {
     "ru": [("⚖ Баланс — тот же размер, лучше картинка", "balance"),
            ("🤏 Ширинка — меньше файл, важные целы",      "shrink"),
+           ("📦 Q3 — компактный, держит качество",         "q3"),
            ("🔥 Экстрим-ширинка — жмёт максимально сильно", "extreme"),
            ("💎 Качество — чуть больше, максимум",         "quality"),
            ("▦ Плоский — равномерный (старый)",           "flat")],
     "en": [("⚖ Balance — same size, better image",        "balance"),
            ("🤏 Shrink — smaller file, salient kept",      "shrink"),
+           ("📦 Q3 — compact, keeps quality",              "q3"),
            ("🔥 Extreme shrink — maximum compression",     "extreme"),
            ("💎 Quality — a bit bigger, max",              "quality"),
            ("▦ Flat — uniform (legacy)",                   "flat")],
