@@ -194,6 +194,107 @@ def _smart_alloc(items, qn, mode="balance", log=print):
     log(f"   SMART[{mode}]: ↑{nu} важных→{up_t}, ↓{nd} тупых→{dn1}{x2}  (Δразмер {delta:+.0f} МБ)")
     return alloc
 
+def _err_at(sens, qn):
+    """Ожидаемая ошибка слоя при битности qn.
+
+    sens замерен Q4-зондом (‖W−Wq4‖), а ошибка квантования падает примерно вдвое
+    на каждый добавленный бит. Нормируем к Q4: err(Q4)=sens, err(Q5)≈sens/2 и т.д.
+    Нужна, чтобы сравнивать РАЗНЫЕ ступени между собой в одних единицах.
+    """
+    return sens * (2.0 ** (_BPW["Q4_0"] - _BPW[qn]))
+
+
+def _smart_alloc_v2(items, qn, mode="balance", log=print):
+    """Аллокатор бит по ВЫГОДЕ НА БАЙТ (жадный рюкзак).
+
+    Чем отличается от v1. Там слои сортировались по голой чувствительности и
+    верхние 30% тянулись вверх, нижние 30% вниз. Но `sens` — АБСОЛЮТНАЯ ошибка,
+    она растёт вместе с размером тензора, поэтому «самый чувствительный» почти
+    всегда означал «самый большой». Бюджет уходил на пару огромных слоёв, а
+    десяток мелких, где тот же апгрейд стоил копейки, оставался нетронутым.
+
+    Здесь выбор идёт по отношению Δошибки к Δбайт:
+      • вверх тянем тех, кто даёт больше всего снижения ошибки на потраченный байт;
+      • вниз жмём тех, кто добавляет меньше всего ошибки на освобождённый байт.
+    Это классический жадный рюкзак, и он оптимален с точностью до одного элемента.
+
+    Ещё одно отличие: в v1 цикл апгрейда делал `break`, как только очередной
+    кандидат не влезал в бюджет — один жирный тензор глушил все последующие,
+    хотя мелкие ещё помещались. Здесь `continue`, бюджет добирается до конца.
+    """
+    m = _SMART_MODES.get(mode, _SMART_MODES["balance"])
+    up_t = _step(qn, +1)
+    dn1  = _step(qn, -1)
+    dn2  = _step(dn1, -1) if dn1 else None
+    valid = [it for it in items if it[3] >= 0]
+    if len(valid) < 6 or (up_t is None and dn1 is None):
+        return {}
+    n = len(valid)
+    alloc = {}
+    freed = 0.0
+
+    # ── ВНИЗ: дешевле всего отдать ошибку за байт ──
+    if dn1 is not None:
+        cands = []
+        for key, cols, params, sens in valid:
+            for tgt, two in ((dn1, False), (dn2, True)):
+                if tgt is None or cols % _BLK[tgt]:
+                    continue
+                gain_b = params * (_BPW[qn] - _BPW[tgt]) / 8.0      # освобождаем байт
+                loss_e = _err_at(sens, tgt) - _err_at(sens, qn)     # добавляем ошибки
+                if gain_b <= 0:
+                    continue
+                cands.append((loss_e / gain_b, key, tgt, gain_b, two))
+        cands.sort(key=lambda t: t[0])                              # дешёвые первыми
+        dn_cap  = max(1, int(n * m["dn"]))
+        two_cap = int(dn_cap * m["two"])
+        used = two_used = 0
+        for _r, key, tgt, gain_b, two in cands:
+            if used >= dn_cap or key in alloc:
+                continue
+            if two:
+                if two_used >= two_cap:
+                    continue
+                two_used += 1
+            alloc[key] = tgt
+            freed += gain_b
+            used += 1
+
+    # ── ВВЕРХ: больше всего снижения ошибки за байт, в пределах бюджета ──
+    if up_t is not None:
+        cands = []
+        for key, cols, params, sens in valid:
+            if key in alloc or cols % _BLK[up_t]:
+                continue
+            cost_b = params * (_BPW[up_t] - _BPW[qn]) / 8.0
+            gain_e = _err_at(sens, qn) - _err_at(sens, up_t)
+            if cost_b <= 0:
+                continue
+            cands.append((gain_e / cost_b, key, cost_b))
+        cands.sort(key=lambda t: -t[0])                             # выгодные первыми
+        budget = m["budget"] * freed if freed > 0 else float("inf")
+        spent = 0.0
+        up_cap = int(n * m["up"])
+        used = 0
+        for _r, key, cost_b in cands:
+            if used >= up_cap:
+                break
+            if spent + cost_b > budget:
+                continue        # ← v1 тут делал break и терял мелкие апгрейды
+            spent += cost_b
+            used += 1
+            alloc[key] = up_t
+
+    nu = sum(1 for v in alloc.values() if v == up_t)
+    nd = sum(1 for v in alloc.values() if v in (dn1, dn2))
+    n2 = sum(1 for v in alloc.values() if v == dn2)
+    delta = sum(params * (_BPW[alloc[k]] - _BPW[qn]) / 8.0
+                for k, _, params, _ in valid if k in alloc) / 1e6
+    x2 = f", из них {n2}->{dn2} (x2)" if n2 else ""
+    log(f"   SMART-v2[{mode}]: вверх {nu}->{up_t}, вниз {nd}->{dn1}{x2}  (dsize {delta:+.0f} MB)")
+    return alloc
+
+
 def find_model_dirs():
     """Авто-детект папок моделей ComfyUI + LM Studio (существующие)."""
     home = os.path.expanduser("~")
@@ -610,7 +711,12 @@ def compress_file(src, qn, log=print):
                 sens = float(np.linalg.norm(d - _q4_roundtrip(data, shape).reshape(-1)))
             except Exception: sens = -1.0
             items.append((key, int(shape[1]), npm, sens))
-        smart_alloc = _smart_alloc(items, qn, _smart_mode(), log)
+        # XQUANT_ALLOC=v2 → аллокатор по выгоде-на-байт (жадный рюкзак).
+        # Дефолт v1 — старое поведение, чтобы боевые сборки не поехали молча.
+        _alloc_fn = (_smart_alloc_v2
+                     if os.environ.get("XQUANT_ALLOC", "v1").strip().lower() == "v2"
+                     else _smart_alloc)
+        smart_alloc = _alloc_fn(items, qn, _smart_mode(), log)
     n_total = len(keys)
     nq = nf = nup = 0; out = []; total = 0
     for k, dt, shape, raw in load_tensors(src):

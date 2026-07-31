@@ -1,0 +1,44 @@
+{
+  "lpips_per_layer": {
+    "transformer_blocks.0.attn.to_q": 0.0040415069088339806,
+    "transformer_blocks.0.attn.to_v": 0.0036600164603441954,
+    "transformer_blocks.0.ff.net.0.proj": 0.004541965667158365,
+    "transformer_blocks.0.ff.net.2": 0.00449492980260402,
+    "transformer_blocks.9.attn.to_q": 0.00447944481857121,
+    "single_transformer_blocks.0.norm.linear": 0.010931991506367922
+  },
+  "ranked": [
+    [
+      "single_transformer_blocks.0.norm.linear",
+      0.010931991506367922
+    ],
+    [
+      "transformer_blocks.0.ff.net.0.proj",
+      0.004541965667158365
+    ],
+    [
+      "transformer_blocks.0.ff.net.2",
+      0.00449492980260402
+    ],
+    [
+      "transformer_blocks.9.attn.to_q",
+      0.00447944481857121
+    ],
+    [
+      "transformer_blocks.0.attn.to_q",
+      0.0040415069088339806
+    ],
+    [
+      "transformer_blocks.0.attn.to_v",
+      0.0036600164603441954
+    ]
+  ],
+  "meta": {
+    "prompts": 2,
+    "steps": 8,
+    "res": 512,
+    "n_layers_probed": 6,
+    "n_linear_total": 504,
+    "elapsed_s": 18
+  }
+}

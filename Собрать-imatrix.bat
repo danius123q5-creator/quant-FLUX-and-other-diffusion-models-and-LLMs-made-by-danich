@@ -15,5 +15,5 @@ if "%PY%"=="" set "PY=python"
 echo Использую python: %PY%
 "%PY%" -u "%SCRIPT%" %*
 echo.
-echo Готово. Файл .imatrix.npy рядом. Укажи его в XQuant.exe (поле imatrix).
+echo Готово. Файл .imatrix.npy рядом. Укажи его в gears2.exe (поле imatrix).
 pause

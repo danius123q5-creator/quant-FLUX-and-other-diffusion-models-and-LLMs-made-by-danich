@@ -1,4 +1,4 @@
-# Жматель (XQuant) — custom diffusion-model quantizer (zero third-party engine)
+# Жматель (gears2) — custom diffusion-model quantizer (zero third-party engine)
 
 **🇬🇧 English** · [🇷🇺 Русский](README.ru.md)
 
@@ -38,7 +38,7 @@ no City96 `convert.py`, no torch:
 
 ## LLM requantization (GGUF → GGUF, no re-download)
 Drop an existing **LLM GGUF** (from LM Studio etc.) and shrink it further —
-no need to download the raw 15 GB safetensors. XQuant reads the GGUF, dequantizes
+no need to download the raw 15 GB safetensors. gears2 reads the GGUF, dequantizes
 weights in RAM, applies critical-layer protection, and repacks to any of
 2/3/4/5/6/8-bit — **preserving all metadata and the tokenizer** verbatim (raw KV
 passthrough), so the result loads in llama.cpp / LM Studio.
@@ -48,7 +48,7 @@ passthrough), so the result loads in llama.cpp / LM Studio.
 `BF16` / `F32` are **byte-for-byte identical** to the `gguf` reference
 (`dequantize`), so even a `Q4_K_M` from LM Studio re-packs correctly.
 ```
-XQuant.exe model-Q4_K_M.gguf Q3_K     # existing LM-Studio quant → smaller, tokenizer intact
+gears2.exe model-Q4_K_M.gguf Q3_K     # existing LM-Studio quant → smaller, tokenizer intact
 ```
 Best source is still **F16 or Q8_0** — re-quantizing an already-lossy K-quant
 (e.g. `Q4_K_M → Q2_K`) compounds error (double loss); the tool warns you when
@@ -60,7 +60,7 @@ Input embeddings, the output projection to the VAE (`final_layer` / `conv_out` /
 connection is never broken (the classic sub-4-bit "colour noise").
 
 ## Smart bit allocation — SMART (on by default)
-Not every layer deserves the same bits. Before writing, XQuant runs a cheap
+Not every layer deserves the same bits. Before writing, gears2 runs a cheap
 **Q4 probe** over each 2-D weight and measures the *absolute* reconstruction
 error `‖W − dequant(quant(W))‖` — how much a layer actually resists quantization.
 Then it **reallocates bits, size-neutrally**:
@@ -117,10 +117,10 @@ weights each input channel by `sum(act²)` instead of `x²`:
    ```
    > Note: `cpu_offload` can segfault with hooks on new torch (cu13x) — the script
    > avoids it by keeping only the transformer on GPU (~24 GB, fits a 24-32 GB card).
-2. **ComfyUI node** — add the **XQuant imatrix: Capture** node before your `KSampler`
+2. **ComfyUI node** — add the **gears2 imatrix: Capture** node before your `KSampler`
    and **Save** after it, run 1–3 generations → `<model>.imatrix.npy`.
 
-Point `XQuant.exe` at the file (🎯 imatrix field) or set `XQUANT_IMATRIX=<path>`. It composes
+Point `gears2.exe` at the file (🎯 imatrix field) or set `XQUANT_IMATRIX=<path>`. It composes
 with **any** mode — pair it with 🤏 Shrink / 🔥 Extreme for the smallest file that
 still looks right. Data-free fallback (weight `x²`) when no imatrix is given.
 
@@ -195,9 +195,9 @@ an outlier one). Full write-up, method and images: **[RESEARCH-1bit-flux.md](RES
 > deployable floor remains Q2_K.
 
 ## Usage
-**Easiest — the standalone `XQuant.exe`** (20 MB, no Python needed, numpy bundled):
-drag a `.safetensors` model onto `XQuant.exe` → get `<model>-Q2_K.gguf` next to it.
-Or from a terminal: `XQuant.exe <model.safetensors> [Q4_0|Q3_K|Q2_K]`.
+**Easiest — the standalone `gears2.exe`** (20 MB, no Python needed, numpy bundled):
+drag a `.safetensors` model onto `gears2.exe` → get `<model>-Q2_K.gguf` next to it.
+Or from a terminal: `gears2.exe <model.safetensors> [Q4_0|Q3_K|Q2_K]`.
 
 With Python instead:
 ```
@@ -231,7 +231,7 @@ click it.
 
 ## Loading in ComfyUI
 Copy `comfyui-node/ComfyUI-XQuant` into `ComfyUI/custom_nodes/`. It adds
-**`XQuant GGUF Loader`** — pick a `.gguf` and it dequantizes on load and builds
+**`gears2 GGUF Loader`** — pick a `.gguf` and it dequantizes on load and builds
 the model with ComfyUI's own machinery (`load_diffusion_model_state_dict`), so the
 architecture (FLUX / SD3 / SDXL / …) is auto-detected from the tensor keys. Our
 `Q4_0` GGUF also loads fine with City96's stock `UnetLoaderGGUF`.
@@ -242,8 +242,8 @@ music models too. The catch is the **loader**, not the compression:
 - A model **already in GGUF** (music LLMs, Whisper, MusicGen-GGUF) → the
   `.gguf → .gguf` requant path shrinks it and it runs in its native llama.cpp /
   whisper.cpp runtime **today**.
-- An **audio-diffusion `.safetensors`** (Stable Audio, ACE-Step) → XQuant will
-  compress it (arch tag `unknown`), and the dedicated **`XQuant Music Loader`**
+- An **audio-diffusion `.safetensors`** (Stable Audio, ACE-Step) → gears2 will
+  compress it (arch tag `unknown`), and the dedicated **`gears2 Music Loader`**
   node loads it back. ComfyUI natively detects Stable Audio (by
   `transformer.rotary_pos_emb.inv_freq`) and ACE-Step (by `genre_embedder.weight`)
   from the reconstructed state-dict, so the compressed DiT loads through the same
