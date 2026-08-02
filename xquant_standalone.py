@@ -165,6 +165,7 @@ def _smart_alloc(items, qn, mode="balance", log=print):
     valid = [it for it in items if it[3] >= 0]
     if len(valid) < 6 or (up_t is None and dn1 is None):
         return {}
+    valid = _apply_weights(valid, log)                     # см. _apply_weights
     by_sens = sorted(valid, key=lambda t: t[3])            # по возрастанию важности
     n = len(by_sens); alloc = {}; freed = 0.0
     # ── ТУПЫЕ (низ) → вниз; самые тупые в «ширинке» — на 2 ступени ──
@@ -300,6 +301,30 @@ def _edge_weights(keys, guard=None):
             if v is not None and (v < lo + guard or v > hi - guard)}
 
 
+def _apply_weights(valid, log=print):
+    """Умножить чувствительность на веса по ТИПУ блока и на защиту КРАЁВ.
+
+    🔴 ПОЧЕМУ ЭТО ОТДЕЛЬНАЯ ФУНКЦИЯ, А НЕ КОД ВНУТРИ АЛЛОКАТОРА (02.08.2026):
+    защита краёв была вписана ТОЛЬКО в `_smart_alloc_v2`, а сборка по умолчанию идёт
+    через `_smart_alloc` (v1) — см. XQUANT_ALLOC ниже. То есть выложенная «включённой
+    по умолчанию» защита в обычной сборке НЕ ВЫЗЫВАЛАСЬ вовсе: файл выходил байт в байт
+    прежним, и строка лога не печаталась. Поймано тем, что новый и старый Q3_K совпали
+    по размеру до байта. Проверка тогда звала `_smart_alloc_v2` напрямую — то есть
+    ветку, в которую боевой путь не заходит. Теперь оба аллокатора зовут ЭТУ функцию.
+
+    Веса — множители чувствительности, они не зависят от стратегии раздачи бит,
+    поэтому работают одинаково в обоих аллокаторах.
+    """
+    _tw = _type_weight if _env_on("XQUANT_TYPE_BIAS", "0") else (lambda k: 1.0)
+    _ew = _edge_weights([it[0] for it in valid]) if _env_on("XQUANT_EDGE_GUARD", "1") else {}
+    if _ew:
+        log(f"раскладка: защищаю крайние блоки — {len(_ew)} тензоров, вес x{list(_ew.values())[0]:g}")
+    if _env_on("XQUANT_TYPE_BIAS", "0"):
+        log(f"раскладка: вес по типу блока ВКЛЮЧЁН — attn x{os.environ.get('XQUANT_W_ATTN','4.0')}, "
+            f"ffn x{os.environ.get('XQUANT_W_FFN','0.5')}")
+    return [(k, c, p, s * _tw(k) * _ew.get(k, 1.0)) for (k, c, p, s) in valid]
+
+
 def _smart_alloc_v2(items, qn, mode="balance", log=print):
     """Аллокатор бит по ВЫГОДЕ НА БАЙТ (жадный рюкзак).
 
@@ -338,15 +363,7 @@ def _smart_alloc_v2(items, qn, mode="balance", log=print):
     # Июльские кадры, из которых ось выведена, снимались на FLUX — на WAN они не переносятся.
     # Вскрытие боевого Q2_K показало, что llama.cpp делает обратное (ffn больше бит), и по
     # этому опыту права она. Включать осознанно: XQUANT_TYPE_BIAS=1.
-    _tw = (lambda k: _type_weight(k)) if _env_on("XQUANT_TYPE_BIAS", "0") else (lambda k: 1.0)
-    # Защита КРАЙНИХ блоков — единственный приём, откалиброванный с двух сторон (см.
-    # _edge_weights). Работает тем же рычагом, что и вес по типу: поднимаем
-    # чувствительность, и рюкзак сам перестаёт жать края, а лишние биты берёт с середины.
-    # Дефолт ВКЛЮЧЁН: замер показал, что четверть бита возвращает лицо, а не тратится зря.
-    _ew = _edge_weights([it[0] for it in valid]) if _env_on("XQUANT_EDGE_GUARD", "1") else {}
-    if _ew:
-        log(f"раскладка: защищаю крайние блоки — {len(_ew)} тензоров, вес x{list(_ew.values())[0]:g}")
-    valid = [(k, c, p, s * _tw(k) * _ew.get(k, 1.0)) for (k, c, p, s) in valid]
+    valid = _apply_weights(valid, log)
 
     if dn1 is not None:
         cands = []
@@ -810,11 +827,13 @@ def compress_file(src, qn, log=print):
     if smart:
         log("   SMART: зондирую важность слоёв (Q4-roundtrip relerr)...")
         items = []
+        _p_all = 0            # ВСЕ загруженные параметры — знаменатель охвата паспорта
         for k, dt, shape, raw in load_tensors(src):
             if pfx and not k.startswith(pfx): continue
             key = k[len(pfx):] if pfx and k.startswith(pfx) else k
             if dt not in ("F32","F16","BF16","F8_E4M3","F8_E5M2"): continue
             nd = len(shape); npm = int(np.prod(shape)) if shape else 1
+            _p_all += npm     # считаем ДО отсева, иначе охват опишет сам себя («96.6% из 96.6%»)
             if not (nd == 2 and npm > QUANT_THRESHOLD and not CRITICAL(key) and shape[1] % 32 == 0):
                 continue
             data = _decode(raw, dt, shape)
@@ -839,10 +858,44 @@ def compress_file(src, qn, log=print):
             items.append((key, int(shape[1]), npm, sens))
         # XQUANT_ALLOC=v2 → аллокатор по выгоде-на-байт (жадный рюкзак).
         # Дефолт v1 — старое поведение, чтобы боевые сборки не поехали молча.
-        _alloc_fn = (_smart_alloc_v2
-                     if os.environ.get("XQUANT_ALLOC", "v1").strip().lower() == "v2"
-                     else _smart_alloc)
+        _alloc_name = os.environ.get("XQUANT_ALLOC", "v1").strip().lower()
+        _alloc_fn = _smart_alloc_v2 if _alloc_name == "v2" else _smart_alloc
+        # ПАСПОРТ СБОРКИ (02.08.2026). Печатаем, ЧЕМ и КАК собрано, до самой сборки.
+        # Повод: «включено» и «сработало» оказались разными вещами — защита краёв стояла
+        # дефолтом, но жила в ветке, которую боевой путь не вызывает, и это вскрылось
+        # только тем, что новый файл совпал со старым ДО БАЙТА. Размер как признак
+        # «сработало» ненадёжен вдвойне: два файла одного размера оказались разными внутри.
+        log(f"   ПАСПОРТ: аллокатор={_alloc_name} режим={_smart_mode()} "
+            f"EDGE_GUARD={'вкл' if _env_on('XQUANT_EDGE_GUARD','1') else 'выкл'}"
+            f"(N={os.environ.get('XQUANT_EDGE_N','2')}) "
+            f"TYPE_BIAS={'вкл' if _env_on('XQUANT_TYPE_BIAS','0') else 'выкл'}")
         smart_alloc = _alloc_fn(items, qn, _smart_mode(), log)
+        # ФАКТИЧЕСКИЙ БЮДЖЕТ БИТ ПО ГРУППАМ. Три вещи, на которых первая версия этой
+        # строки врала бы (поймано вычиткой ДО коммита, 02.08.2026):
+        #  1) идти надо по ВСЕМ слоям, а не по smart_alloc — там лежат только СДВИНУТЫЕ,
+        #     и среднее считалось по подмножеству, размер которого пляшет от прогона;
+        #  2) взвешивать по ПАРАМЕТРАМ, а не по числу слоёв: тензоры различаются на два
+        #     порядка, и среднее «по слою» может расти, когда файл на самом деле худеет;
+        #  3) печатать ВСЕГДА — при пустой раскладке отсутствие строки читается как
+        #     «сборка не дошла до паспорта», хотя она идёт.
+        # Граница честная: `items` набирается только из КВАНТУЕМЫХ тензоров (2D, крупные,
+        # не критические, ширина кратна блоку). Одномерные, мелкие и критические остаются
+        # в исходной точности и сюда не входят — поэтому с размером файла эта цифра
+        # сходиться не обязана, о чём и написано в самой строке.
+        _by = {}
+        for _k, _c, _p, _s in items:
+            _g = ("attn" if _ATTN_RE.search(_k) else "ffn" if _FFN_RE.search(_k) else "прочее")
+            _bits = _BPW[smart_alloc.get(_k, qn)] * 8.0
+            _acc = _by.setdefault(_g, [0.0, 0])
+            _acc[0] += _bits * _p; _acc[1] += _p
+        _p_q = sum(v[1] for v in _by.values())
+        log(f"   ОХВАТ: квантуемая часть {_p_q/1e9:.2f} из {_p_all/1e9:.2f} млрд параметров "
+            f"({100.0*_p_q/max(_p_all,1):.1f}%); остальное — одномерные, мелкие и критические, "
+            f"они остаются в исходной точности и в цифры ниже НЕ входят")
+        log("   ФАКТ, бит/вес по КВАНТУЕМОЙ части (база %.2f): " % (_BPW[qn] * 8.0)
+            + (" | ".join(f"{g}: {v[0]/v[1]:.2f} ({v[1]/1e6:.0f} млн)"
+                          for g, v in sorted(_by.items()) if v[1])
+               if smart_alloc else "раскладка пуста — все слои на базовом типе"))
     n_total = len(keys)
     nq = nf = nup = 0; out = []; total = 0
     for k, dt, shape, raw in load_tensors(src):
