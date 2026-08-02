@@ -26,7 +26,12 @@ for k in f.keys():
     W = f.get_tensor(k)
     # УНИВЕРСАЛЬНАЯ защита критических слоёв (все архитектуры) — xquant.is_critical.
     if (k.endswith(".weight") and W.dim()==2 and W.numel()>=4096
-            and re.search(r"attn|mlp|linear|qkv|proj", k)
+            # ffn добавлен 2026-08-01: писалось под FLUX, где полносвязные зовутся
+            # mlp, а в WAN они ffn — и мимо упаковки уходили САМЫЕ КРУПНЫЕ слои
+            # (blocks.15.ffn.0 = 44 млн весов, вчетверо больше attention). Файл
+            # выходил заметно меньше сжатым, а картинка ЛУЧШЕ настоящих 1.6 бита —
+            # то есть ошибка была бы В ПОЛЬЗУ проверяемой гипотезы, самый обидный вид.
+            and re.search(r"attn|mlp|ffn|linear|qkv|proj", k)
             and not xq.is_critical(k)):
         arr = W.float().numpy()
         q, scale, gpad = xq.our_quantize_ternary(arr, group=GROUP)   # −1/0/+1 + scale
